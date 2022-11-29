@@ -1,5 +1,5 @@
 **************************************************************************************************
-* CoCo WX 2.0 - Written By Todd Wallace
+* CoCo WX 2.1 - Written By Todd Wallace
 *
 * So I am a bit of a weather geek. I even have my own outdoor wireless sensor that can measure 
 * wind speed, direction, rainfall, etc. Weather "apps" are available on almost every platform
@@ -7,6 +7,11 @@
 * found this cool web-based poweruser-oriented online weather service called wttr.in. It's 
 * free to use and has a very simple implementation. I figured out how to do a simple HTTP 
 * request over a TCP connection made with DriveWire's virtual serial port drivers and voila!
+*
+* New In Versin 2.1
+* - better handling of HTTP server error responses
+* - better detection of locations that arent found in the search
+* - proper support for spaces in the location name
 *
 * New in Version 2.0
 *
@@ -179,7 +184,7 @@ screenUpdateSeq 	FDB  	$1B40,0,40  		; move draw pointer
 			FDB 	$1B4A,319,199  	; draw a solid bar rectangle to blank out most of the screen
 screenUpdateSeqSz  	EQU  	*-screenUpdateSeq
 
-strTitle 		FCN 	"CoCo WX v2.0 - Written by Todd Wallace\r\n\n"
+strTitle 		FCN 	"CoCo WX v2.1 - Written by Todd Wallace\r\n\n"
 strUsage		FCC 	"Check live weather conditions for anywhere in the world using your CoCo! This\r\n"
 			FCC 	"tool works by leveraging DriveWire (required) and the online weather info and\r\n"
 			FCC 	"forecasting service wttr.in to request and retrieve live data.\r\n\n"
@@ -199,11 +204,11 @@ strUsage		FCC 	"Check live weather conditions for anywhere in the world using yo
 			FCC  	"   but you can request a manual refresh at any time by pressing the ENTER key.\r\n"
 strUsageSz 		EQU 	*-strUsage
 
-strConnecting		FCN 	"Connecting..."
-strConnectSuccess 	FCN  	"Success\r\nRetrieving weather data... "
+strConnecting		FCN 	"Connecting... "
+strConnectSuccess 	FCN  	"Success\r\nRequesting weather data... "
 strDone 		FCN  	"Done\r\n"
 strMsgLoadingGfx  	FCN  	"Loading graphics from disk... "
-strGfxRetrieving  	FCN  	"     Updating WX Data: Retrieving..."
+strGfxRetrieving  	FCN  	"     Updating WX Data: Requesting..."
 strGfxTimeout  	FCN  	"         Error: Network Timeout"
 strGfxConnecting  	FCN  	"     Updating WX Data: Connecting..."
 
@@ -219,7 +224,7 @@ strUserAgent 		FCN 	"User-Agent: curl/7.68.0\r\n\r\n"
 ;strWeatherFormatTxt 	FCN 	"?format=TANDY%l\\n%C\\n%x\\n%t\\n%f\\n%h\\n%P\\n%w\\n%p\\n%m\\n%S\\n%s\\n"
 strWeatherFormatTxt 	FCN  	"?format=j2"
 ;strWeatherFormatTxt 	FCN  	"?T2n"
-strGetConnection  	FCN  	"Connection: keep-alive\r\n\r\n"
+;strGetConnection  	FCN  	"Connection: keep-alive\r\n"
 
 strConnectFailed 	FCN 	"\x03\rCould not connect to server ("
 
@@ -227,6 +232,7 @@ strKEYWORDok 		FCN 	"OK "
 strKEYWORDfail 	FCN 	"FAIL "
 strKEYWORDcontent  	FCN 	"CONTENT-LENGTH: "
 strKEYWORDtong  	FCN  	"TONG"
+strKEYWORDhttp1.1  	FCN  	"HTTP/1.1"
 strKEYWORDdoubleCRLF FCB  	$0D,$0A,$0D,$0A,0
 
 ; json keywords and variable pointers
@@ -332,7 +338,7 @@ strForecastHighLow 	FCN  	"                "
 
 strPartlyCloudy 	FCN 	"Partly Cloudy"
 strLightSnowShowers 	FCN 	"Light Snow Showers"
-strGfxCoCoWX 		FCN 	"CoCo WX v2.0"
+strGfxCoCoWX 		FCN 	"CoCo WX v2.1"
 strGfxAuthor  	FCN  	"Written by Todd Wallace"
 strGfxFeelsLike  	FCN  	"Feels Like: "
 strGfxHumidity	FCN   	"Humidity: "
@@ -466,7 +472,8 @@ strErrorNoDrivewire 	FCN 	"Error opening path to DriveWire Virtual Serial Port m
 strErrorVRNmodule 	FCN 	"Error opening path to /NIL module which is needed for connection timeout timer\r\nto function. Otherwise you will have to manually exit by pressing ESC.\r\n"
 strErrorTimeout 	FCN 	"\x03\rError communicating with the wttr.in weather service. Connection either timed\r\nout or didn't responded to the request as expected. Is your DriveWire server\r\nconnected to the internet? Try visiting https://wttr.in from it to make sure the service is working and not having an outage.\r\n"
 strErrorGraphics  	FCN  	"Graphics files not found. Exiting...\r\n"
-strErrorLocation  	FCN  	"Error (Location not found)\r\n"
+strErrorLocation  	FCN  	"Location not found ("
+strErrorServerReply 	FCN  	"Unexpected server reply ("
 
 asciiHexList	FCC 	"0123456789ABCDEF"
 ; -----------------------------------------------------
@@ -800,11 +807,34 @@ MAINLOOP_NEW_DATA_COPY_NEXT
 	subd  	<dwReadBytes
 	std   	<contentLength
 	lbhi  	MAINLOOP_NEXT_READ  	; if we have not reached 0 (or less) bytes reamining, keep copying
-	bra   	PROCESS_WEATHER_DATA
+	lbra  	PROCESS_WEATHER_DATA
 
 MAINLOOP_CHECK_HEADER_STUFF
 	lda  	<contentLengthFlag
-	bne  	MAINLOOP_NEW_DATA_FIND_BODY
+	lbne  	MAINLOOP_NEW_DATA_FIND_BODY
+	; before going any further, retrieve the HTTP server reply code to see if we have a valid
+	; reply from the server, or some kind of error like "Bad Reqest" of "Not Found"
+	leay  	strKEYWORDhttp1.1,PCR 
+	ldx  	<replyBufferCurPtr
+	lbsr  	STRING_SEARCH_BUFFER
+	lbcs  	MAINLOOP_NEXT_READ
+	; if here, we found the HTTP reply version. check the reply code and handle accordingly
+	lbsr   FIND_NEXT_NONSPACE_CHAR
+	ldd  	#"40"
+	cmpd  	,X 
+	bne  	MAINLOOP_CHECK_HEADER_VALID_REQUEST
+	cmpa  	2,X 
+	lbeq  	ERROR_LOCATION_NOT_FOUND
+	lbra  	ERROR_UNKNOWN_SERVER_RESPONSE
+
+MAINLOOP_CHECK_HEADER_VALID_REQUEST
+	ldd  	#"20"
+	cmpd  	,X 
+	lbne  	ERROR_UNKNOWN_SERVER_RESPONSE
+	cmpb  	2,X
+	lbne  	ERROR_UNKNOWN_SERVER_RESPONSE
+	; if here, we have a valid HTTP response code 200
+	; now search for the content length information so we know how much weather data to read in
 	leay  	strKEYWORDcontent,PCR 
 	ldx  	<replyBufferCurPtr
 	lbsr  	STRING_SEARCH_BUFFER
@@ -1434,6 +1464,22 @@ DISPLAY_INFO_USAGE
 	os9 	I$Write 
 	bra 	CLOSE_EXIT
 
+ERROR_UNKNOWN_SERVER_RESPONSE
+	; X should still be pointed to server error code in the HTTP reply header
+	stx  	<tempPtr
+	leay  	outputBuffer,U 
+	leax  	strErrorServerReply,PCR 
+	lbsr  	STRING_COPY_RAW
+	ldx  	<tempPtr
+	lbsr  	STRING_COPY_CR
+	lda  	#')'
+	ldb  	#C$CR 
+	std 	,Y
+	ldd  	#$0A00 
+	std  	2,Y
+	leax  	outputBuffer,U 
+	bra  	CLOSE_EXIT_PRINT_STDOUT
+
 ERROR_INVALID_PARAMS
 	leax 	strErrorInvalidParam,PCR
 	bra 	CLOSE_EXIT_PRINT_STDOUT
@@ -1459,7 +1505,17 @@ ERROR_NO_DRIVEWIRE
 	bra 	CLOSE_EXIT_PRINT_STDOUT
 
 ERROR_LOCATION_NOT_FOUND
+	leay  	outputBuffer,U 
 	leax  	strErrorLocation,PCR 
+	lbsr  	STRING_COPY_RAW
+	ldx  	<shellParamPtr
+	lbsr  	STRING_COPY_CR
+	lda  	#')'
+	ldb  	#C$CR 
+	std 	,Y
+	ldd  	#$0A00 
+	std  	2,Y
+	leax  	outputBuffer,U 
 	bra  	CLOSE_EXIT_PRINT_STDOUT
 
 ERROR_GRAPHICS_MISSING
@@ -1684,7 +1740,7 @@ SEND_WEATHER_REQUEST
 	leax 	strGetPrefix,PCR 
 	lbsr 	STRING_COPY_RAW
 	ldx 	<shellParamPtr
-	lbsr 	STRING_COPY_CR
+	lbsr 	LOCATION_COPY
 	leax 	strWeatherFormatTxt,PCR 
 	lbsr 	STRING_COPY_RAW
 	leax 	strGetSuffix,PCR
@@ -1693,8 +1749,6 @@ SEND_WEATHER_REQUEST
 	lbsr 	STRING_COPY_RAW
 	leax 	strUserAgent,PCR 
 	lbsr 	STRING_COPY_RAW
-	;leax  	strGetConnection,PCR 
-	;lbsr  	STRING_COPY_RAW
 
 	leax 	outputBuffer,U 
 	lbsr 	FIND_LEN_UNTIL_EOF

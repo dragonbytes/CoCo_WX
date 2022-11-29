@@ -270,6 +270,38 @@ STRING_COPY_CR_DONE
 	puls 	D,X,PC 
 
 ; ---------------------------------------------
+; copy the text location into the query to make
+; to get weather data for
+; Entry: X = pointer to location text
+; ---------------------------------------------
+LOCATION_COPY
+	pshs 	X,D 
+	clrb 
+LOCATION_COPY_NEXT_CHAR
+	lda 	,X+
+	cmpa 	#C$CR
+	beq 	LOCATION_COPY_DONE
+	cmpa 	#C$SPAC 
+	bne  	LOCATION_COPY_STORE_CHAR
+	; if here, we found a space character in location text. substitute %20 for them
+	lda  	#'%'
+	sta  	,Y+
+	lda 	#'2'
+	sta  	,Y+
+	lda  	#'0'
+LOCATION_COPY_STORE_CHAR
+	sta 	,Y+
+	decb 
+	bne 	LOCATION_COPY_NEXT_CHAR
+	; if here, overflow 
+	clr 	,Y 	; mark NULL in destination 
+	coma 
+	puls 	D,X,PC 
+LOCATION_COPY_DONE
+	clr 	,Y 	; mark NULL in destination 
+	puls 	D,X,PC 
+
+; ---------------------------------------------
 ; Entry: A = path to write output to 
 ; ---------------------------------------------
 PRINT_NULL_STRING
